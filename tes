@@ -1,0 +1,116 @@
+!pip install tensorflow_model_optimization
+
+import numpy as np
+import tensorflow as tf
+
+
+from tensorflow_model_optimization.python.core.sparsity.keras import prune
+from tensorflow_model_optimization.python.core.sparsity.keras import pruning_callbacks
+from tensorflow_model_optimization.python.core.sparsity.keras import pruning_schedule
+from tensorflow_model_optimization.python.core.sparsity.keras import pruning_wrapper
+import pandas as pd
+from tensorflow.keras.utils import to_categorical
+
+keras = tf.keras
+K = tf.keras.backend
+
+def print_model_sparsity(pruned_model):
+  
+  def _get_sparsity(weights):
+    return 1.0 - np.count_nonzero(weights) / float(weights.size)
+
+  print("Model Sparsity Summary ({})".format(pruned_model.name))
+  print("--")
+  for layer in pruned_model.layers:
+    if isinstance(layer, pruning_wrapper.PruneLowMagnitude):
+      prunable_weights = layer.layer.get_prunable_weights()
+      if prunable_weights:
+        print("{}: {}".format(
+            layer.name, ", ".join([
+                "({}, {})".format(weight.name,
+                                  str(_get_sparsity(K.get_value(weight))))
+                for weight in prunable_weights
+            ])))
+  print("\n")
+  
+  
+  max_features = 20000
+maxlen = 100  # cut texts after this number of words
+batch_size = 32
+
+ts = 100 #timestep
+train = pd.read_csv('/content/drive/MyDrive/Dataset VAE/uncalibrated/train_final_u/train_1_u.csv')
+test = pd.read_csv('/content/drive/MyDrive/Dataset VAE/uncalibrated/valid_final_u/valid_1_u.csv')
+del train['Timestamp']
+del train['Cycle']
+del train['Active Button']
+
+del test['Timestamp']
+del test['Cycle']
+del test['Active Button']
+
+x_train = (train.values[:,0:10])
+xt = int(x_train.shape[0]/ts)
+x_train = x_train.reshape((xt,ts,10))
+y_train = pd.read_csv('/content/drive/MyDrive/Dataset VAE/hasil_labeling_train_u.csv')
+
+x_test = (test.values[:,0:10])
+xs = int(x_test.shape[0]/ts)
+x_test = x_test.reshape((xs,ts,10))
+y_test = pd.read_csv('/content/drive/MyDrive/Dataset VAE/hasil_labeling_valid_u.csv')
+
+  #zero ofset
+y_train = y_train - 1
+y_test = y_test - 1
+
+  #one hot encode
+y_train = to_categorical(y_train)
+y_test = to_categorical(y_test)
+
+print(x_train.shape, x_test.shape, y_train.shape, y_test.shape)
+
+#print("Loading data...")
+#(x_train,
+# y_train), (x_test,
+#            y_test) = keras.datasets.imdb.load_data(num_words=max_features)
+print(len(x_train), "train sequences")
+print(len(x_test), "test sequences")
+
+print("Pad sequences (samples x time)")
+x_train = keras.preprocessing.sequence.pad_sequences(x_train, maxlen=maxlen)
+x_test = keras.preprocessing.sequence.pad_sequences(x_test, maxlen=maxlen)
+print("x_train shape:", x_train.shape)
+print("x_test shape:", x_test.shape)
+
+print("Build model...")
+model = keras.models.Sequential()
+model.add(keras.layers.Embedding(max_features, 128, input_length=maxlen))
+model.add(keras.layers.LSTM(128))  # try using a GRU instead, for fun
+model.add(keras.layers.Dropout(0.5))
+model.add(keras.layers.Dense(1))
+model.add(keras.layers.Activation("softmax"))
+
+model.summary()
+
+model = prune.prune_low_magnitude(model, pruning_schedule.PolynomialDecay(
+    initial_sparsity=0.3, final_sparsity=0.7, begin_step=1000, end_step=3000))
+
+# try using different optimizers and different optimizer configs
+model.compile(loss="categorical_crossentropy",
+              optimizer="adam",
+              metrics=["accuracy"])
+print_model_sparsity(model)
+
+model.summary()
+
+print("Train...")
+model.fit(x_train, y_train, batch_size=batch_size, epochs=3,
+          callbacks=[pruning_callbacks.UpdatePruningStep()],
+          validation_data=(x_test, y_test))
+
+
+score, acc = model.evaluate(x_test, y_test,
+                            batch_size=batch_size)
+print_model_sparsity(model)
+print("Test score:", score)
+print("Test accuracy:", acc)
